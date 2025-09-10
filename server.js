@@ -10,7 +10,7 @@ app.post("/voice", (req, res) => {
   const twiml = new VoiceResponse();
 
   // Simple greeting
-  twiml.say("Hello, thanks for calling! How can I help you today?", { voice: "alice" });
+  twiml.say("Hello, thanks for calling! How can I help you today?", { voice: "Polly.Joanna" });
 
   // Listen to caller's speech
   const gather = twiml.gather({
