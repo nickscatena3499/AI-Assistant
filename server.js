@@ -1,20 +1,17 @@
 // server.js
 const express = require('express');
 const bodyParser = require('body-parser');
-const { Configuration, OpenAIApi } = require('openai');
+const OpenAI = require('openai');
 const { VoiceResponse } = require('twilio').twiml;
-
 require('dotenv').config();
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 
-// OpenAI setup
-const openai = new OpenAIApi(
-  new Configuration({
-    apiKey: process.env.OPENAI_API_KEY,
-  })
-);
+// OpenAI setup (new SDK)
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 // Route: First greet caller
 app.post('/voice', (req, res) => {
@@ -26,7 +23,8 @@ app.post('/voice', (req, res) => {
     speechTimeout: 'auto'
   });
 
-  gather.say({ voice: process.env.POLLY_VOICE || "Polly.Joanna" },
+  gather.say(
+    { voice: process.env.POLLY_VOICE || "Polly.Joanna" },
     "Hello, I am your AI assistant. How can I help you today?"
   );
 
@@ -41,13 +39,15 @@ app.post('/gather', async (req, res) => {
 
   if (speechResult) {
     try {
-      const response = await openai.createChatCompletion({
+      // Ask OpenAI
+      const response = await openai.chat.completions.create({
         model: "gpt-4o-mini",
-        messages: [{ role: "user", content: speechResult }]
+        messages: [{ role: "user", content: speechResult }],
       });
 
-      const reply = response.data.choices[0].message.content;
+      const reply = response.choices[0].message.content;
 
+      // Respond back to caller
       twiml.say({ voice: process.env.POLLY_VOICE || "Polly.Joanna" }, reply);
     } catch (error) {
       console.error("OpenAI error:", error);
