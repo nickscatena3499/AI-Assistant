@@ -1,18 +1,16 @@
 // server.js
 const express = require("express");
 const bodyParser = require("body-parser");
-const { Configuration, OpenAIApi } = require("openai");
+const OpenAI = require("openai");
 const twilio = require("twilio");
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 
-// OpenAI setup
-const openai = new OpenAIApi(
-  new Configuration({
-    apiKey: process.env.OPENAI_API_KEY,
-  })
-);
+// OpenAI setup (new SDK v4)
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 // Twilio setup
 const client = twilio(
@@ -29,13 +27,13 @@ app.post("/voice", async (req, res) => {
 
     console.log("🔹 User said:", userQuestion);
 
-    // Send to OpenAI
-    const aiResponse = await openai.createChatCompletion({
+    // Send to OpenAI (new SDK method)
+    const aiResponse = await openai.chat.completions.create({
       model: "gpt-3.5-turbo",
       messages: [{ role: "user", content: userQuestion }],
     });
 
-    const assistantReply = aiResponse.data.choices[0].message.content;
+    const assistantReply = aiResponse.choices[0].message.content;
     console.log("🤖 Assistant reply:", assistantReply);
 
     // Speak response
@@ -50,7 +48,7 @@ app.post("/voice", async (req, res) => {
   res.send(twiml.toString());
 });
 
-// Start server (Render uses process.env.PORT automatically)
+// Start server (Render auto-sets PORT)
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
