@@ -1,94 +1,98 @@
 import express from "express";
 import bodyParser from "body-parser";
 import twilio from "twilio";
-import dotenv from "dotenv";
 import OpenAI from "openai";
-
-dotenv.config();
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 
-// ✅ OpenAI setup
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// ✅ Root test endpoint
-app.get("/", (req, res) => {
-  res.send("✅ AI Voice Assistant is running.");
-});
+// 🟢 Helper: Generate current context
+function getBusinessContext() {
+  const now = new Date();
+  return `
+You are a helpful AI voice assistant for ${process.env.BUSINESS_NAME || "Nick's Argentine Barbecue"}.
+Today’s date is ${now.toLocaleDateString()} and the current time is ${now.toLocaleTimeString()}.
+Business hours: ${process.env.BUSINESS_HOURS || "Mon-Sun 10am to 10pm"}.
+Address: ${process.env.BUSINESS_ADDRESS || "6445 Biscayne Blvd, Miami, FL"}.
+Phone: ${process.env.BUSINESS_PHONE || "555-123-4567"}.
 
-// ✅ First call entrypoint
+Always answer as if you are part of this business, and keep responses short and conversational for voice. 
+If someone asks to make a reservation, confirm the time/day relative to today’s date.
+`;
+}
+
+// 🟢 Handle incoming call
 app.post("/voice", (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
 
-  // Prompt + gather speech
   const gather = twiml.gather({
     input: "speech",
     action: "/gather",
     method: "POST",
+    speechTimeout: "1", // ⏱️ respond quicker (1 second after silence)
   });
 
-  gather.say("Hello! How can I assist you today?", {
-    voice: process.env.POLLY_VOICE || "alice",
-    language: "en-US",
-  });
-
-  // Fallback if no speech input
-  twiml.say("Goodbye!");
+  gather.say(
+    { voice: process.env.POLLY_VOICE || "Polly.Matthew", language: "en-US" },
+    "Hello! How can I assist you today?"
+  );
 
   res.type("text/xml");
   res.send(twiml.toString());
 });
 
-// ✅ Handle speech input from Twilio
+// 🟢 Handle gathered speech
 app.post("/gather", async (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
-  const speechResult = req.body.SpeechResult;
+  const speechResult = req.body.SpeechResult || "";
 
-  console.log("🔹 User said:", speechResult);
+  console.log("User said:", speechResult);
 
-  if (speechResult) {
-    try {
-      // Send to OpenAI
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: "You are a helpful voice assistant for businesses." },
-          { role: "user", content: speechResult },
-        ],
-      });
-
-      const reply = completion.choices[0].message.content;
-      console.log("🤖 Assistant reply:", reply);
-
-      // Respond and keep listening
-      const gather = twiml.gather({
-        input: "speech",
-        action: "/gather",
-        method: "POST",
-      });
-
-      gather.say(reply, {
-        voice: process.env.POLLY_VOICE || "alice",
-        language: "en-US",
-      });
-
-    } catch (err) {
-      console.error("❌ Error with OpenAI/Twilio:", err.message);
-      twiml.say("Sorry, I had a problem connecting to the assistant.");
-    }
-  } else {
-    twiml.say("I didn’t hear anything. Goodbye!");
+  if (!speechResult) {
+    twiml.say(
+      { voice: process.env.POLLY_VOICE || "Polly.Matthew", language: "en-US" },
+      "Sorry, I didn’t catch that. Could you repeat?"
+    );
+    return res.type("text/xml").send(twiml.toString());
   }
 
-  res.type("text/xml");
-  res.send(twiml.toString());
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: getBusinessContext() },
+        { role: "user", content: speechResult },
+      ],
+    });
+
+    const aiResponse =
+      completion.choices[0].message.content || "I’m not sure about that.";
+
+    console.log("AI response:", aiResponse);
+
+    twiml.say(
+      { voice: process.env.POLLY_VOICE || "Polly.Matthew", language: "en-US" },
+      aiResponse
+    );
+
+    // Keep call open for another round
+    twiml.redirect("/voice");
+  } catch (err) {
+    console.error("Error with OpenAI:", err);
+    twiml.say(
+      { voice: process.env.POLLY_VOICE || "Polly.Matthew", language: "en-US" },
+      "Sorry, I had trouble processing that."
+    );
+  }
+
+  res.type("text/xml").send(twiml.toString());
 });
 
-// ✅ Start server
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () =>
+  console.log(`🚀 Server running on port ${PORT}`)
+);
