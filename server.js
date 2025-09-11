@@ -1,62 +1,109 @@
 import express from "express";
 import bodyParser from "body-parser";
 import twilio from "twilio";
-import OpenAI from "openai";
+import dotenv from "dotenv";
+import { PollyClient, SynthesizeSpeechCommand } from "@aws-sdk/client-polly";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import { OpenAI } from "openai";
 
+dotenv.config();
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+// Twilio + OpenAI setup
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const VoiceResponse = twilio.twiml.VoiceResponse;
+
+// AWS Polly setup
+const polly = new PollyClient({
+  region: process.env.AWS_REGION,
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  },
 });
 
-// 🟢 Helper: Generate current context
-function getBusinessContext() {
-  const now = new Date();
-  return `
-You are a helpful AI voice assistant for ${process.env.BUSINESS_NAME || "Nick's Argentine Barbecue"}.
-Today’s date is ${now.toLocaleDateString()} and the current time is ${now.toLocaleTimeString()}.
-Business hours: ${process.env.BUSINESS_HOURS || "Mon-Sun 10am to 10pm"}.
-Address: ${process.env.BUSINESS_ADDRESS || "6445 Biscayne Blvd, Miami, FL"}.
-Phone: ${process.env.BUSINESS_PHONE || "555-123-4567"}.
+// Directory for temp audio files
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const audioDir = path.join(__dirname, "audio");
+if (!fs.existsSync(audioDir)) fs.mkdirSync(audioDir);
 
-Always answer as if you are part of this business, and keep responses short and conversational for voice. 
-If someone asks to make a reservation, confirm the time/day relative to today’s date.
+// Helper: synthesize speech with Polly
+async function synthesizeSpeech(text) {
+  const voice = process.env.POLLY_VOICE || "Joanna"; // e.g. Joanna, Matthew
+  const command = new SynthesizeSpeechCommand({
+    OutputFormat: "mp3",
+    Text: text,
+    VoiceId: voice,
+  });
+  const response = await polly.send(command);
+
+  const audioFile = path.join(audioDir, `speech-${Date.now()}.mp3`);
+  const buffer = await response.AudioStream.transformToByteArray();
+  fs.writeFileSync(audioFile, Buffer.from(buffer));
+
+  return audioFile;
+}
+
+// Business/system context for assistant
+function getBusinessContext() {
+  return `
+You are a polite, helpful AI phone assistant.
+- You always respond conversationally and naturally.
+- You know the current date and time: ${new Date().toLocaleString()}.
+- If asked to book something "today" or "tomorrow", use this information.
+- Keep answers short, clear, and human-like. Do not sound robotic.
+- If you cannot perform a task, say you’ll forward the request to a human.
 `;
 }
 
-// 🟢 Handle incoming call
-app.post("/voice", (req, res) => {
-  const twiml = new twilio.twiml.VoiceResponse();
+// Route: initial greeting
+app.post("/voice", async (req, res) => {
+  const twiml = new VoiceResponse();
+
+  const greetingText = "Hello! How can I assist you today?";
+  const audioFile = await synthesizeSpeech(greetingText);
+
+  // Serve MP3 from server
+  twiml.play(`${req.protocol}://${req.get("host")}/audio/${path.basename(audioFile)}`);
 
   const gather = twiml.gather({
     input: "speech",
     action: "/gather",
     method: "POST",
-    speechTimeout: "1", // ⏱️ respond quicker (1 second after silence)
+    speechTimeout: "auto",
   });
 
-  gather.say(
-    { voice: process.env.POLLY_VOICE || "Polly.Matthew", language: "en-US" },
-    "Hello! How can I assist you today?"
-  );
-
-  res.type("text/xml");
-  res.send(twiml.toString());
+  res.type("text/xml").send(twiml.toString());
 });
 
-// 🟢 Handle gathered speech
+// Route: serve audio files
+app.get("/audio/:filename", (req, res) => {
+  const filePath = path.join(audioDir, req.params.filename);
+  res.sendFile(filePath);
+});
+
+// Route: handle conversation
 app.post("/gather", async (req, res) => {
-  const twiml = new twilio.twiml.VoiceResponse();
+  const twiml = new VoiceResponse();
   const speechResult = req.body.SpeechResult || "";
 
-  console.log("User said:", speechResult);
+  console.log("🔹 User said:", speechResult);
 
   if (!speechResult) {
-    twiml.say(
-      { voice: process.env.POLLY_VOICE || "Polly.Matthew", language: "en-US" },
-      "Sorry, I didn’t catch that. Could you repeat?"
-    );
+    const fallback = "Sorry, I didn’t catch that. Could you repeat?";
+    const audioFile = await synthesizeSpeech(fallback);
+    twiml.play(`${req.protocol}://${req.get("host")}/audio/${path.basename(audioFile)}`);
+
+    const gather = twiml.gather({
+      input: "speech",
+      action: "/gather",
+      method: "POST",
+      speechTimeout: "auto",
+    });
     return res.type("text/xml").send(twiml.toString());
   }
 
@@ -72,27 +119,31 @@ app.post("/gather", async (req, res) => {
     const aiResponse =
       completion.choices[0].message.content || "I’m not sure about that.";
 
-    console.log("AI response:", aiResponse);
+    console.log("🤖 AI response:", aiResponse);
 
-    twiml.say(
-      { voice: process.env.POLLY_VOICE || "Polly.Matthew", language: "en-US" },
-      aiResponse
-    );
+    const audioFile = await synthesizeSpeech(aiResponse);
+    twiml.play(`${req.protocol}://${req.get("host")}/audio/${path.basename(audioFile)}`);
 
-    // Keep call open for another round
-    twiml.redirect("/voice");
+    // Stay in conversation mode (no redirect to /voice, no repeat greeting)
+    const gather = twiml.gather({
+      input: "speech",
+      action: "/gather",
+      method: "POST",
+      speechTimeout: "auto",
+    });
   } catch (err) {
-    console.error("Error with OpenAI:", err);
-    twiml.say(
-      { voice: process.env.POLLY_VOICE || "Polly.Matthew", language: "en-US" },
-      "Sorry, I had trouble processing that."
-    );
+    console.error("❌ Error with OpenAI/Polly:", err);
+
+    const errorText = "Sorry, I had trouble processing that.";
+    const audioFile = await synthesizeSpeech(errorText);
+    twiml.play(`${req.protocol}://${req.get("host")}/audio/${path.basename(audioFile)}`);
   }
 
   res.type("text/xml").send(twiml.toString());
 });
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () =>
-  console.log(`🚀 Server running on port ${PORT}`)
-);
+// Start server
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
