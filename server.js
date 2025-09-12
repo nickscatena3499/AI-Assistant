@@ -1,7 +1,7 @@
 import express from "express";
 import dotenv from "dotenv";
 import twilio from "twilio";
-import { Configuration, OpenAIApi } from "openai";
+import OpenAI from "openai";
 import { PollyClient, SynthesizeSpeechCommand } from "@aws-sdk/client-polly";
 import fs from "fs";
 
@@ -13,12 +13,10 @@ app.use(express.urlencoded({ extended: true }));
 // Twilio setup
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
-// OpenAI setup
-const openai = new OpenAIApi(
-  new Configuration({
-    apiKey: process.env.OPENAI_API_KEY,
-  })
-);
+// OpenAI setup (new SDK)
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 // AWS Polly setup
 const polly = new PollyClient({
@@ -29,14 +27,13 @@ const polly = new PollyClient({
   },
 });
 
-// Simple conversation history (per session, in-memory)
+// Simple in-memory conversation history
 let conversationHistory = [];
 
-// Handle incoming call
+// Incoming call handler
 app.post("/voice", async (req, res) => {
   const twiml = new VoiceResponse();
 
-  // Ask caller for input
   twiml.gather({
     input: "speech",
     action: "/gather",
@@ -47,7 +44,7 @@ app.post("/voice", async (req, res) => {
   res.send(twiml.toString());
 });
 
-// Handle caller speech input
+// Handle speech input
 app.post("/gather", async (req, res) => {
   const twiml = new VoiceResponse();
   const speechResult = req.body.SpeechResult;
@@ -57,29 +54,29 @@ app.post("/gather", async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   }
 
-  // Add user input to conversation history
+  // Add user input to conversation
   conversationHistory.push({ role: "user", content: speechResult });
 
-  // Get AI response from OpenAI
+  // Get AI reply
   let aiReply = "I'm not sure how to answer that.";
   try {
-    const completion = await openai.createChatCompletion({
+    const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: conversationHistory,
     });
-    aiReply = completion.data.choices[0].message.content;
+    aiReply = completion.choices[0].message.content;
     conversationHistory.push({ role: "assistant", content: aiReply });
   } catch (err) {
     console.error("OpenAI error:", err);
   }
 
-  // Convert text to speech with Polly
-  let audioFile = "./response.mp3";
+  // Convert AI reply to speech with Polly
+  const audioFile = "./response.mp3";
   try {
     const command = new SynthesizeSpeechCommand({
       Text: aiReply,
       OutputFormat: "mp3",
-      VoiceId: "Joanna", // Change to "Matthew", "Amy", etc.
+      VoiceId: "Joanna", // natural female voice, can change
     });
     const data = await polly.send(command);
 
@@ -90,21 +87,21 @@ app.post("/gather", async (req, res) => {
     console.error("Polly error:", err);
   }
 
-  // Play audio back to the caller
+  // Play AI reply back
   twiml.play(`https://${req.headers.host}/response.mp3`);
 
-  // Then gather again for continued conversation
+  // Continue the loop
   twiml.gather({
     input: "speech",
     action: "/gather",
     method: "POST",
-  }).say("You can ask me something else.");
+  }).say("What else would you like to ask?");
 
   res.type("text/xml");
   res.send(twiml.toString());
 });
 
-// Serve Polly MP3 responses
+// Serve audio file
 app.get("/response.mp3", (req, res) => {
   res.sendFile("response.mp3", { root: "." });
 });
