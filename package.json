@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "AI Voice Assistant using Twilio, OpenAI, and AWS Polly",
   "main": "server.js",
+  "type": "module",
   "scripts": {
     "start": "node server.js"
   },
