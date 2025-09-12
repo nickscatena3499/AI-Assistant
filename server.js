@@ -1,145 +1,112 @@
 import express from "express";
-import bodyParser from "body-parser";
-import twilio from "twilio";
 import dotenv from "dotenv";
+import twilio from "twilio";
+import { Configuration, OpenAIApi } from "openai";
 import { PollyClient, SynthesizeSpeechCommand } from "@aws-sdk/client-polly";
 import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-import { OpenAI } from "openai";
 
 dotenv.config();
-const app = express();
-app.use(bodyParser.urlencoded({ extended: false }));
 
-// Twilio + OpenAI setup
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const app = express();
+app.use(express.urlencoded({ extended: true }));
+
+// Twilio setup
 const VoiceResponse = twilio.twiml.VoiceResponse;
+
+// OpenAI setup
+const openai = new OpenAIApi(
+  new Configuration({
+    apiKey: process.env.OPENAI_API_KEY,
+  })
+);
 
 // AWS Polly setup
 const polly = new PollyClient({
-  region: process.env.AWS_REGION,
+  region: process.env.AWS_REGION, // e.g. "us-east-1"
   credentials: {
     accessKeyId: process.env.AWS_ACCESS_KEY_ID,
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
   },
 });
 
-// Directory for temp audio files
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const audioDir = path.join(__dirname, "audio");
-if (!fs.existsSync(audioDir)) fs.mkdirSync(audioDir);
+// Simple conversation history (per session, in-memory)
+let conversationHistory = [];
 
-// Helper: synthesize speech with Polly
-async function synthesizeSpeech(text) {
-  const voice = process.env.POLLY_VOICE || "Joanna"; // e.g. Joanna, Matthew
-  const command = new SynthesizeSpeechCommand({
-    OutputFormat: "mp3",
-    Text: text,
-    VoiceId: voice,
-  });
-  const response = await polly.send(command);
-
-  const audioFile = path.join(audioDir, `speech-${Date.now()}.mp3`);
-  const buffer = await response.AudioStream.transformToByteArray();
-  fs.writeFileSync(audioFile, Buffer.from(buffer));
-
-  return audioFile;
-}
-
-// Business/system context for assistant
-function getBusinessContext() {
-  return `
-You are a polite, helpful AI phone assistant.
-- You always respond conversationally and naturally.
-- You know the current date and time: ${new Date().toLocaleString()}.
-- If asked to book something "today" or "tomorrow", use this information.
-- Keep answers short, clear, and human-like. Do not sound robotic.
-- If you cannot perform a task, say you’ll forward the request to a human.
-`;
-}
-
-// Route: initial greeting
+// Handle incoming call
 app.post("/voice", async (req, res) => {
   const twiml = new VoiceResponse();
 
-  const greetingText = "Hello! How can I assist you today?";
-  const audioFile = await synthesizeSpeech(greetingText);
-
-  // Serve MP3 from server
-  twiml.play(`${req.protocol}://${req.get("host")}/audio/${path.basename(audioFile)}`);
-
-  const gather = twiml.gather({
+  // Ask caller for input
+  twiml.gather({
     input: "speech",
     action: "/gather",
     method: "POST",
-    speechTimeout: "auto",
-  });
+  }).say("Hello, I am your AI assistant. How can I help you today?");
 
-  res.type("text/xml").send(twiml.toString());
+  res.type("text/xml");
+  res.send(twiml.toString());
 });
 
-// Route: serve audio files
-app.get("/audio/:filename", (req, res) => {
-  const filePath = path.join(audioDir, req.params.filename);
-  res.sendFile(filePath);
-});
-
-// Route: handle conversation
+// Handle caller speech input
 app.post("/gather", async (req, res) => {
   const twiml = new VoiceResponse();
-  const speechResult = req.body.SpeechResult || "";
-
-  console.log("🔹 User said:", speechResult);
+  const speechResult = req.body.SpeechResult;
 
   if (!speechResult) {
-    const fallback = "Sorry, I didn’t catch that. Could you repeat?";
-    const audioFile = await synthesizeSpeech(fallback);
-    twiml.play(`${req.protocol}://${req.get("host")}/audio/${path.basename(audioFile)}`);
-
-    const gather = twiml.gather({
-      input: "speech",
-      action: "/gather",
-      method: "POST",
-      speechTimeout: "auto",
-    });
+    twiml.say("Sorry, I didn't catch that. Can you repeat?");
     return res.type("text/xml").send(twiml.toString());
   }
 
+  // Add user input to conversation history
+  conversationHistory.push({ role: "user", content: speechResult });
+
+  // Get AI response from OpenAI
+  let aiReply = "I'm not sure how to answer that.";
   try {
-    const completion = await openai.chat.completions.create({
+    const completion = await openai.createChatCompletion({
       model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: getBusinessContext() },
-        { role: "user", content: speechResult },
-      ],
+      messages: conversationHistory,
     });
-
-    const aiResponse =
-      completion.choices[0].message.content || "I’m not sure about that.";
-
-    console.log("🤖 AI response:", aiResponse);
-
-    const audioFile = await synthesizeSpeech(aiResponse);
-    twiml.play(`${req.protocol}://${req.get("host")}/audio/${path.basename(audioFile)}`);
-
-    // Stay in conversation mode (no redirect to /voice, no repeat greeting)
-    const gather = twiml.gather({
-      input: "speech",
-      action: "/gather",
-      method: "POST",
-      speechTimeout: "auto",
-    });
+    aiReply = completion.data.choices[0].message.content;
+    conversationHistory.push({ role: "assistant", content: aiReply });
   } catch (err) {
-    console.error("❌ Error with OpenAI/Polly:", err);
-
-    const errorText = "Sorry, I had trouble processing that.";
-    const audioFile = await synthesizeSpeech(errorText);
-    twiml.play(`${req.protocol}://${req.get("host")}/audio/${path.basename(audioFile)}`);
+    console.error("OpenAI error:", err);
   }
 
-  res.type("text/xml").send(twiml.toString());
+  // Convert text to speech with Polly
+  let audioFile = "./response.mp3";
+  try {
+    const command = new SynthesizeSpeechCommand({
+      Text: aiReply,
+      OutputFormat: "mp3",
+      VoiceId: "Joanna", // Change to "Matthew", "Amy", etc.
+    });
+    const data = await polly.send(command);
+
+    if (data.AudioStream) {
+      fs.writeFileSync(audioFile, data.AudioStream);
+    }
+  } catch (err) {
+    console.error("Polly error:", err);
+  }
+
+  // Play audio back to the caller
+  twiml.play(`https://${req.headers.host}/response.mp3`);
+
+  // Then gather again for continued conversation
+  twiml.gather({
+    input: "speech",
+    action: "/gather",
+    method: "POST",
+  }).say("You can ask me something else.");
+
+  res.type("text/xml");
+  res.send(twiml.toString());
+});
+
+// Serve Polly MP3 responses
+app.get("/response.mp3", (req, res) => {
+  res.sendFile("response.mp3", { root: "." });
 });
 
 // Start server
