@@ -13,7 +13,7 @@ app.use(express.urlencoded({ extended: true }));
 // Twilio setup
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
-// OpenAI setup (new SDK)
+// OpenAI setup (new SDK v4)
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
@@ -76,7 +76,7 @@ app.post("/gather", async (req, res) => {
     const command = new SynthesizeSpeechCommand({
       Text: aiReply,
       OutputFormat: "mp3",
-      VoiceId: "Joanna", // natural female voice, can change
+      VoiceId: "Joanna", // natural female voice
     });
     const data = await polly.send(command);
 
