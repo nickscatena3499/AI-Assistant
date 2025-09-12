@@ -1,86 +1,87 @@
 import express from "express";
 import bodyParser from "body-parser";
+import { OpenAI } from "openai";
+import { twiml as Twiml } from "twilio";
 import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-import { PollyClient, SynthesizeSpeechCommand } from "@aws-sdk/client-polly";
-import OpenAI from "openai";
-import twilio from "twilio";
-import { v4 as uuidv4 } from "uuid"; // for unique filenames
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
-app.use(bodyParser.json());
 
-const client = twilio();
-const openai = new OpenAI();
-const polly = new PollyClient({ region: "us-east-1" });
-
-// 🔹 Serve static audio files
-app.use("/audio", express.static(path.join(__dirname, "audio")));
-
-// Ensure audio directory exists
-if (!fs.existsSync(path.join(__dirname, "audio"))) {
-  fs.mkdirSync(path.join(__dirname, "audio"));
-}
-
-app.post("/voice", async (req, res) => {
-  try {
-    console.log("📞 Incoming call request:", req.body);
-
-    const userSpeech = req.body.SpeechResult || "Hello";
-    console.log("🗣️ Caller said:", userSpeech);
-
-    // 🔹 Generate AI response
-    const aiResponse = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: userSpeech }],
-    });
-
-    const text =
-      aiResponse.choices[0].message.content || "How can I assist you today?";
-    console.log("🤖 OpenAI response:", text);
-
-    // 🔹 Generate unique filename
-    const fileId = uuidv4();
-    const audioFilename = `response-${fileId}.mp3`;
-    const audioPath = path.join(__dirname, "audio", audioFilename);
-
-    // 🔹 Generate speech with Polly Neural voice
-    const command = new SynthesizeSpeechCommand({
-      OutputFormat: "mp3",
-      Engine: "neural", // 👈 more natural speech
-      Text: text,
-      VoiceId: "Joanna", // try Kimberly, Matthew, Salli for variety
-    });
-    const { AudioStream } = await polly.send(command);
-
-    fs.writeFileSync(
-      audioPath,
-      Buffer.from(await AudioStream.transformToByteArray())
-    );
-    console.log("🔊 Audio saved:", audioPath);
-
-    // 🔹 Build TwiML response
-    const twiml = new twilio.twiml.VoiceResponse();
-    twiml.play(`${req.protocol}://${req.get("host")}/audio/${audioFilename}`);
-    twiml.gather({
-      input: "speech",
-      action: "/voice",
-      method: "POST",
-    });
-
-    res.type("text/xml");
-    res.send(twiml.toString());
-  } catch (error) {
-    console.error("❌ Error handling call:", error);
-    res.status(500).send("Error processing call");
-  }
+// ✅ OpenAI client
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
 });
 
+// Utility: get current date/time
+function getDateTime() {
+  const now = new Date();
+  return now.toLocaleString("en-US", { dateStyle: "full", timeStyle: "short" });
+}
+
+// ✅ First call entrypoint
+app.post("/voice", async (req, res) => {
+  const twiml = new Twiml.VoiceResponse();
+
+  // Greeting + gather
+  twiml.say("Hello, this is your AI assistant. How can I help you today?");
+  const gather = twiml.gather({
+    input: "speech",
+    action: "/gather",
+    speechTimeout: "auto",
+  });
+
+  res.type("text/xml");
+  res.send(twiml.toString());
+});
+
+// ✅ Handle speech input
+app.post("/gather", async (req, res) => {
+  const userSpeech = req.body.SpeechResult || "";
+  console.log("🎙️ User said:", userSpeech);
+
+  let replyText = "I didn’t catch that. Could you repeat?";
+
+  try {
+    // Add context about time/date
+    const systemPrompt = `You are a helpful voice assistant. 
+The current date and time is ${getDateTime()}. 
+Respond conversationally, as if you are a real human on the phone.`;
+
+    // Call OpenAI
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userSpeech },
+      ],
+    });
+
+    replyText = completion.choices[0].message.content;
+    console.log("🤖 OpenAI reply:", replyText);
+  } catch (err) {
+    console.error("❌ OpenAI error:", err);
+    replyText = "Sorry, I had a problem answering that.";
+  }
+
+  // Build TwiML with reply + new Gather to continue conversation
+  const twiml = new Twiml.VoiceResponse();
+  twiml.say({ voice: "Polly.Joanna" }, replyText); // Twilio Polly voice
+  twiml.gather({
+    input: "speech",
+    action: "/gather",
+    speechTimeout: "auto",
+  });
+
+  res.type("text/xml");
+  res.send(twiml.toString());
+});
+
+// ✅ Health check
+app.get("/", (req, res) => {
+  res.send("AI Voice Assistant is running.");
+});
+
+// ✅ Port
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
