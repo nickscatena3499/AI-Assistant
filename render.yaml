@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: ai-voice-assistant
+    env: node
+    plan: free
+    buildCommand: "yarn"
+    startCommand: "npm start"
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
