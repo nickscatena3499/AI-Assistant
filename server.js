@@ -1,96 +1,109 @@
 import express from "express";
+import pkg from "twilio";
 import bodyParser from "body-parser";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-import twilio from "twilio";
-import { OpenAI } from "openai";
+import fetch from "node-fetch";
+import OpenAI from "openai";
 
-const { twiml: Twiml } = twilio;
+const { twiml: Twiml } = pkg;
 const app = express();
+const port = process.env.PORT || 10000;
+
 app.use(bodyParser.urlencoded({ extended: false }));
 
-// OpenAI
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// File path helper
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Keep session history
+// Conversation memory (simple in-memory, can move to Redis/DB later)
 let conversationHistory = [];
+let currentLanguage = "en"; // "en" = English, "es" = Spanish
 
+// Helper: get current date/time
+function getCurrentDateTime() {
+  const now = new Date();
+  return now.toLocaleString(currentLanguage === "es" ? "es-ES" : "en-US", {
+    dateStyle: "full",
+    timeStyle: "short",
+  });
+}
+
+// Route for incoming calls
 app.post("/voice", async (req, res) => {
   const twiml = new Twiml.VoiceResponse();
 
-  try {
-    const userSpeech = req.body.SpeechResult || "";
+  const userInput = req.body.SpeechResult || req.body.Transcription || "";
 
-    // System prompt for restaurant assistant
-    const systemPrompt = {
-      role: "system",
-      content: `You are a polite, professional restaurant phone assistant for "Bella Roma Ristorante".
-      - Greet callers warmly.
-      - Handle reservations.
-      - Answer menu questions with concise but appetizing detail.
-      - If asked about hours, say "We are open daily from 11 AM to 10 PM."
-      - Keep responses short and natural, like a human receptionist.`,
-    };
-
-    // Add conversation history
-    conversationHistory.unshift(systemPrompt);
-    conversationHistory.push({ role: "user", content: userSpeech });
-
-    // Get AI text response
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: conversationHistory,
-    });
-
-    const aiResponse = response.choices[0].message.content;
-    conversationHistory.push({ role: "assistant", content: aiResponse });
-
-    // Generate TTS MP3
-    const speechFile = path.resolve(__dirname, "response.mp3");
-    const mp3 = await openai.audio.speech.create({
-      model: "gpt-4o-mini-tts",
-      voice: "alloy",
-      input: aiResponse,
-    });
-    const buffer = Buffer.from(await mp3.arrayBuffer());
-    fs.writeFileSync(speechFile, buffer);
-
-    // Expose audio file to Twilio
-    app.get("/response.mp3", (req, res2) => {
-      res2.setHeader("Content-Type", "audio/mpeg");
-      res2.sendFile(speechFile);
-    });
-
-    // Tell Twilio to play MP3, then listen again
-    twiml.play(`${req.protocol}://${req.get("host")}/response.mp3`);
-    twiml.gather({
-      input: "speech",
-      action: "/voice",
-      speechTimeout: "auto",
-    });
-
-  } catch (err) {
-    console.error("Error:", err);
-    twiml.say("Sorry, I had trouble handling your request.");
+  // Language switch detection
+  if (/spanish|español/i.test(userInput)) {
+    currentLanguage = "es";
+  } else if (/english|inglés/i.test(userInput)) {
+    currentLanguage = "en";
   }
 
-  res.type("text/xml");
-  res.send(twiml.toString());
+  // Build system prompt
+  const systemPrompt =
+    currentLanguage === "en"
+      ? `You are a helpful AI voice assistant for an Italian restaurant. 
+      Today is ${getCurrentDateTime()}. 
+      Speak naturally, warmly, and keep responses brief like a human. 
+      You can help with menu questions, hours, reservations, and specials.`
+      : `Eres un asistente de voz útil para un restaurante italiano. 
+      Hoy es ${getCurrentDateTime()}. 
+      Habla de manera natural y breve, como una persona real. 
+      Puedes ayudar con preguntas sobre el menú, horarios, reservas y promociones.`;
+
+  // Add user input to conversation history
+  if (userInput.trim()) {
+    conversationHistory.push({ role: "user", content: userInput });
+  }
+
+  try {
+    // Query OpenAI
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: systemPrompt },
+        ...conversationHistory,
+      ],
+    });
+
+    const assistantReply = completion.choices[0].message.content;
+
+    // Save assistant reply to conversation
+    conversationHistory.push({ role: "assistant", content: assistantReply });
+
+    // Convert reply to speech
+    const speechFile = await openai.audio.speech.create({
+      model: "gpt-4o-mini-tts",
+      voice: currentLanguage === "es" ? "aria" : "alloy",
+      input: assistantReply,
+    });
+
+    // Stream audio back to Twilio
+    const buffer = Buffer.from(await speechFile.arrayBuffer());
+    const audioBase64 = buffer.toString("base64");
+
+    twiml.play(
+      {
+        loop: 1,
+      },
+      `data:audio/mpeg;base64,${audioBase64}`
+    );
+
+    res.type("text/xml");
+    res.send(twiml.toString());
+  } catch (error) {
+    console.error("Error:", error);
+    twiml.say(
+      currentLanguage === "es"
+        ? "Lo siento, hubo un problema técnico."
+        : "Sorry, there was a technical issue."
+    );
+    res.type("text/xml");
+    res.send(twiml.toString());
+  }
 });
 
-// Root check
-app.get("/", (req, res) => {
-  res.send("🍝 Bella Roma Assistant running ✅");
-});
-
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+app.listen(port, () =>
+  console.log(`🚀 Server running on http://localhost:${port}`)
+);
