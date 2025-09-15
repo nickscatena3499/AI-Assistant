@@ -1,109 +1,115 @@
 import express from "express";
-import pkg from "twilio";
 import bodyParser from "body-parser";
-import fetch from "node-fetch";
+import pkg from "twilio";
+import fs from "fs";
 import OpenAI from "openai";
 
 const { twiml: Twiml } = pkg;
 const app = express();
-const port = process.env.PORT || 10000;
-
 app.use(bodyParser.urlencoded({ extended: false }));
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Conversation memory (simple in-memory, can move to Redis/DB later)
+// Conversation context & language detection
 let conversationHistory = [];
-let currentLanguage = "en"; // "en" = English, "es" = Spanish
+let language = "en"; // default
 
-// Helper: get current date/time
-function getCurrentDateTime() {
-  const now = new Date();
-  return now.toLocaleString(currentLanguage === "es" ? "es-ES" : "en-US", {
-    dateStyle: "full",
-    timeStyle: "short",
-  });
+function isSpanish(text) {
+  return /[áéíóúñ¿¡]|(gracias|hola|restaurante|mesa|favor|menú|orden)/i.test(
+    text
+  );
 }
 
-// Route for incoming calls
 app.post("/voice", async (req, res) => {
+  console.log("📞 Incoming call:", req.body);
+
   const twiml = new Twiml.VoiceResponse();
-
-  const userInput = req.body.SpeechResult || req.body.Transcription || "";
-
-  // Language switch detection
-  if (/spanish|español/i.test(userInput)) {
-    currentLanguage = "es";
-  } else if (/english|inglés/i.test(userInput)) {
-    currentLanguage = "en";
-  }
-
-  // Build system prompt
-  const systemPrompt =
-    currentLanguage === "en"
-      ? `You are a helpful AI voice assistant for an Italian restaurant. 
-      Today is ${getCurrentDateTime()}. 
-      Speak naturally, warmly, and keep responses brief like a human. 
-      You can help with menu questions, hours, reservations, and specials.`
-      : `Eres un asistente de voz útil para un restaurante italiano. 
-      Hoy es ${getCurrentDateTime()}. 
-      Habla de manera natural y breve, como una persona real. 
-      Puedes ayudar con preguntas sobre el menú, horarios, reservas y promociones.`;
-
-  // Add user input to conversation history
-  if (userInput.trim()) {
-    conversationHistory.push({ role: "user", content: userInput });
-  }
-
   try {
-    // Query OpenAI
+    const userMessage = req.body.SpeechResult || req.body.Body || "";
+
+    if (userMessage) {
+      if (isSpanish(userMessage)) {
+        language = "es";
+        console.log("🌐 Switching to Spanish");
+      }
+      conversationHistory.push({ role: "user", content: userMessage });
+    }
+
+    const now = new Date();
+    const dateTime = now.toLocaleString(language === "es" ? "es-ES" : "en-US", {
+      dateStyle: "full",
+      timeStyle: "short",
+    });
+
+    const systemPrompt =
+      language === "es"
+        ? `Eres un asistente de voz humano para un restaurante italiano.
+        Fecha y hora actual: ${dateTime}.
+        Tareas: reservas, modificar/cancelar reservas, responder sobre el menú y alergias, pedidos para llevar, eventos, horarios del negocio y especiales.
+        Sé profesional, cálido y conciso. Responde en español.`
+        : `You are a human-like restaurant voice assistant.
+        Current date/time: ${dateTime}.
+        Tasks: handle reservations, modify/cancel reservations, answer menu & allergy questions, takeout orders, events, specials, and business hours.
+        Always be polite, professional, and concise.
+        If the caller prefers Spanish, say: "If you’d like to continue in Spanish, just let me know."`;
+
+    const messages = [{ role: "system", content: systemPrompt }, ...conversationHistory];
+
+    // Fast response from OpenAI
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: systemPrompt },
-        ...conversationHistory,
-      ],
+      messages,
     });
 
-    const assistantReply = completion.choices[0].message.content;
+    const aiResponse = completion.choices[0].message.content;
+    console.log("🤖 AI response:", aiResponse);
 
-    // Save assistant reply to conversation
-    conversationHistory.push({ role: "assistant", content: assistantReply });
+    conversationHistory.push({ role: "assistant", content: aiResponse });
 
-    // Convert reply to speech
-    const speechFile = await openai.audio.speech.create({
+    // OpenAI TTS (human-like voice)
+    const voice = language === "es" ? "alloy" : "verse"; // pick best available voices
+    const ttsResponse = await openai.audio.speech.create({
       model: "gpt-4o-mini-tts",
-      voice: currentLanguage === "es" ? "aria" : "alloy",
-      input: assistantReply,
+      voice,
+      input: aiResponse,
     });
 
-    // Stream audio back to Twilio
-    const buffer = Buffer.from(await speechFile.arrayBuffer());
-    const audioBase64 = buffer.toString("base64");
+    const outputFile = "/tmp/response.mp3";
+    const buffer = Buffer.from(await ttsResponse.arrayBuffer());
+    fs.writeFileSync(outputFile, buffer);
 
-    twiml.play(
-      {
-        loop: 1,
-      },
-      `data:audio/mpeg;base64,${audioBase64}`
-    );
+    // Play TTS audio back to user
+    const gather = twiml.gather({
+      input: "speech",
+      action: "/voice",
+      method: "POST",
+    });
+    gather.play(`https://ai-assistant-491f.onrender.com/response.mp3`);
 
     res.type("text/xml");
     res.send(twiml.toString());
   } catch (error) {
-    console.error("Error:", error);
-    twiml.say(
-      currentLanguage === "es"
-        ? "Lo siento, hubo un problema técnico."
-        : "Sorry, there was a technical issue."
-    );
+    console.error("❌ Error in /voice:", error);
+    twiml.say("Sorry, something went wrong. Please try again.");
     res.type("text/xml");
     res.send(twiml.toString());
   }
 });
 
-app.listen(port, () =>
-  console.log(`🚀 Server running on http://localhost:${port}`)
-);
+// Serve audio files
+app.get("/response.mp3", (req, res) => {
+  res.set("Content-Type", "audio/mpeg");
+  fs.createReadStream("/tmp/response.mp3").pipe(res);
+});
+
+// Health check
+app.get("/", (req, res) => {
+  res.send("🍝 Restaurant AI Voice Assistant is running.");
+});
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
+});
