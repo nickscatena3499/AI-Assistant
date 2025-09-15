@@ -1,19 +1,18 @@
 import express from "express";
 import bodyParser from "body-parser";
 import twilio from "twilio";
-import expressWs from "express-ws";
+import expressWsImport from "express-ws";
 import WebSocket from "ws";
 import OpenAI from "openai";
 
 const app = express();
-expressWs(app); // enable ws routes
+const { app: wsApp } = expressWsImport(app); // properly attach WS support
 const port = process.env.PORT || 10000;
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Twilio setup
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
 app.use(bodyParser.urlencoded({ extended: false }));
@@ -30,9 +29,8 @@ const restaurantInfo = {
 // ===== Handle Incoming Calls =====
 app.post("/voice", (req, res) => {
   const twiml = new VoiceResponse();
-
-  // Connect caller to our WebSocket endpoint
   const connect = twiml.connect();
+
   connect.stream({
     url: `wss://${req.headers.host}/media`,
   });
@@ -42,10 +40,9 @@ app.post("/voice", (req, res) => {
 });
 
 // ===== WebSocket Bridge =====
-app.ws("/media", (ws, req) => {
+wsApp.ws("/media", (ws, req) => {
   console.log("🔗 Caller connected to media stream");
 
-  // Connect to OpenAI Realtime API
   const session = new WebSocket("wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview", {
     headers: {
       Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
@@ -56,7 +53,6 @@ app.ws("/media", (ws, req) => {
   session.on("open", () => {
     console.log("✅ Connected to OpenAI Realtime API");
 
-    // Inject system instructions (restaurant context)
     session.send(
       JSON.stringify({
         type: "session.update",
@@ -76,18 +72,16 @@ app.ws("/media", (ws, req) => {
           voice: "alloy",
           modalities: ["text", "audio"],
           input_audio_format: { type: "twilio" },
-          output_audio_format: { type: "twilio" }
+          output_audio_format: { type: "twilio" },
         },
       })
     );
   });
 
-  // Forward audio from Twilio → OpenAI
   ws.on("message", (msg) => {
     session.send(msg);
   });
 
-  // Forward audio back OpenAI → Twilio
   session.on("message", (data) => {
     try {
       ws.send(data.toString());
