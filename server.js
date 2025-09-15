@@ -1,102 +1,91 @@
+// server.js
 import express from "express";
+import expressWs from "express-ws";
 import bodyParser from "body-parser";
-import twilio from "twilio";
-import expressWsImport from "express-ws";
-import WebSocket from "ws";
-import OpenAI from "openai";
+import cors from "cors";
 
 const app = express();
-const { app: wsApp } = expressWsImport(app); // properly attach WS support
-const port = process.env.PORT || 10000;
+expressWs(app);
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+app.use(cors());
+app.use(bodyParser.json());
+
+const PORT = process.env.PORT || 10000;
+
+// 🟢 Root
+app.get("/", (req, res) => {
+  res.send("🚀 AI Voice Assistant is live!");
 });
 
-const VoiceResponse = twilio.twiml.VoiceResponse;
-
-app.use(bodyParser.urlencoded({ extended: false }));
-
-// ===== Restaurant Knowledge Base =====
-const restaurantInfo = {
-  hours: "We are open from 11 AM to 10 PM, Monday through Saturday, and closed on Sunday.",
-  specials: "Today’s specials are truffle pasta and grilled sea bass.",
-  events: "This Friday we’re hosting a live jazz night at 7 PM.",
-  allergy: "We can accommodate gluten-free, nut-free, and dairy-free requests.",
-  menu: "We serve Italian classics including pasta, pizza, risotto, and tiramisu.",
-};
-
-// ===== Handle Incoming Calls =====
-app.post("/voice", (req, res) => {
-  const twiml = new VoiceResponse();
-  const connect = twiml.connect();
-
-  connect.stream({
-    url: `wss://${req.headers.host}/media`,
-  });
-
-  res.type("text/xml");
-  res.send(twiml.toString());
-});
-
-// ===== WebSocket Bridge =====
-wsApp.ws("/media", (ws, req) => {
+// 🟢 Media WebSocket
+app.ws("/media", (ws, req) => {
   console.log("🔗 Caller connected to media stream");
 
-  const session = new WebSocket("wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview", {
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      "OpenAI-Beta": "realtime=v1",
-    },
-  });
-
-  session.on("open", () => {
-    console.log("✅ Connected to OpenAI Realtime API");
-
-    session.send(
-      JSON.stringify({
-        type: "session.update",
-        session: {
-          instructions: `
-            You are a helpful restaurant voice assistant for an Italian restaurant.
-            Tasks:
-            - Answer questions about hours: ${restaurantInfo.hours}
-            - Handle reservations and cancellations.
-            - Provide menu info: ${restaurantInfo.menu}
-            - Handle allergy questions: ${restaurantInfo.allergy}
-            - Share specials: ${restaurantInfo.specials}
-            - Mention upcoming events: ${restaurantInfo.events}
-            - Handle takeout orders.
-            If caller speaks Spanish, switch to Spanish and respond fluently.
-          `,
-          voice: "alloy",
-          modalities: ["text", "audio"],
-          input_audio_format: { type: "twilio" },
-          output_audio_format: { type: "twilio" },
-        },
-      })
-    );
+  ws.on("open", () => {
+    console.log("✅ WebSocket open and ready");
   });
 
   ws.on("message", (msg) => {
-    session.send(msg);
-  });
-
-  session.on("message", (data) => {
     try {
-      ws.send(data.toString());
+      const data = JSON.parse(msg);
+
+      // Handle Twilio start event
+      if (data.event === "start") {
+        console.log(`📞 Call started. Stream SID: ${data.start.streamSid}`);
+        return;
+      }
+
+      // Handle Twilio media packets
+      if (data.event === "media") {
+        console.log("🎤 Received media packet");
+
+        if (ws.readyState === ws.OPEN) {
+          // Echo back for now (replace with AI / TTS later)
+          ws.send(JSON.stringify({
+            event: "media",
+            streamSid: data.streamSid,
+            media: {
+              payload: data.media.payload,
+            },
+          }));
+        }
+      }
+
+      // Handle mark events
+      if (data.event === "mark") {
+        console.log("✅ Mark event received:", data.mark.name);
+      }
     } catch (err) {
-      console.error("⚠️ Error forwarding message:", err);
+      console.error("❌ Error parsing message:", err);
     }
   });
 
   ws.on("close", () => {
-    console.log("❌ Caller disconnected");
-    session.close();
+    console.log("❌ Caller disconnected from media stream");
+  });
+
+  ws.on("error", (err) => {
+    console.error("⚠️ WebSocket error:", err);
   });
 });
 
-// ===== Start Server =====
-app.listen(port, () => {
-  console.log(`🚀 Server running on http://localhost:${port}`);
+// 🟢 Fallback TTS endpoint (English + Spanish)
+app.post("/fallback-tts", (req, res) => {
+  const { text, lang } = req.body;
+
+  let responseText;
+  if (lang === "es") {
+    responseText = text || "Lo siento, no entendí eso. ¿Puede repetirlo?";
+  } else {
+    responseText = text || "Sorry, I didn’t catch that. Could you repeat?";
+  }
+
+  res.json({
+    voice: lang === "es" ? "es-ES-AlvaroNeural" : "en-US-JennyNeural",
+    text: responseText,
+  });
+});
+
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
 });
