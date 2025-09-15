@@ -1,115 +1,108 @@
 import express from "express";
 import bodyParser from "body-parser";
-import pkg from "twilio";
-import fs from "fs";
+import twilio from "twilio";
+import WebSocket from "ws";
 import OpenAI from "openai";
 
-const { twiml: Twiml } = pkg;
 const app = express();
-app.use(bodyParser.urlencoded({ extended: false }));
+const port = process.env.PORT || 10000;
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Conversation context & language detection
-let conversationHistory = [];
-let language = "en"; // default
+// Twilio setup
+const VoiceResponse = twilio.twiml.VoiceResponse;
 
-function isSpanish(text) {
-  return /[áéíóúñ¿¡]|(gracias|hola|restaurante|mesa|favor|menú|orden)/i.test(
-    text
-  );
-}
+app.use(bodyParser.urlencoded({ extended: false }));
 
-app.post("/voice", async (req, res) => {
-  console.log("📞 Incoming call:", req.body);
+// ===== Restaurant Knowledge Base =====
+const restaurantInfo = {
+  hours: "We are open from 11 AM to 10 PM, Monday through Saturday, and closed on Sunday.",
+  specials: "Today’s specials are truffle pasta and grilled sea bass.",
+  events: "This Friday we’re hosting a live jazz night at 7 PM.",
+  allergy: "We can accommodate gluten-free, nut-free, and dairy-free requests.",
+  menu: "We serve Italian classics including pasta, pizza, risotto, and tiramisu.",
+};
 
-  const twiml = new Twiml.VoiceResponse();
-  try {
-    const userMessage = req.body.SpeechResult || req.body.Body || "";
+// ===== Handle Incoming Calls =====
+app.post("/voice", (req, res) => {
+  const twiml = new VoiceResponse();
 
-    if (userMessage) {
-      if (isSpanish(userMessage)) {
-        language = "es";
-        console.log("🌐 Switching to Spanish");
+  // Connect caller to our WebSocket that talks to OpenAI Realtime API
+  const connect = twiml.connect();
+  connect.stream({
+    url: `wss://${req.headers.host}/media`, // WebSocket endpoint
+  });
+
+  res.type("text/xml");
+  res.send(twiml.toString());
+});
+
+// ===== WebSocket Bridge =====
+app.ws("/media", (ws, req) => {
+  console.log("🔗 Caller connected to media stream");
+
+  // Create a Realtime session with OpenAI
+  const session = new WebSocket("wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview", {
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      "OpenAI-Beta": "realtime=v1",
+    },
+  });
+
+  session.on("open", () => {
+    console.log("✅ Connected to OpenAI Realtime API");
+  });
+
+  // Forward audio between Twilio <-> OpenAI
+  ws.on("message", (msg) => {
+    session.send(msg);
+  });
+
+  session.on("message", async (data) => {
+    try {
+      const event = JSON.parse(data.toString());
+
+      // Stream audio responses back to Twilio
+      if (event.type === "response.output_audio.delta") {
+        ws.send(
+          JSON.stringify({
+            event: "media",
+            media: { payload: event.delta }, // base64-encoded audio chunks
+          })
+        );
       }
-      conversationHistory.push({ role: "user", content: userMessage });
+
+      // Handle text analysis (detect Spanish)
+      if (event.type === "response.text.delta") {
+        const text = event.delta.toLowerCase();
+        if (text.includes("español") || text.match(/[ñáéíóú]/)) {
+          session.send(
+            JSON.stringify({
+              type: "response.create",
+              response: {
+                instructions:
+                  "Por supuesto, puedo hablar en español. ¿Cómo puedo ayudarte hoy?",
+                modalities: ["text", "audio"],
+                voice: "alloy",
+              },
+            })
+          );
+        }
+      }
+    } catch (err) {
+      console.error("⚠️ Error handling session event:", err);
     }
+  });
 
-    const now = new Date();
-    const dateTime = now.toLocaleString(language === "es" ? "es-ES" : "en-US", {
-      dateStyle: "full",
-      timeStyle: "short",
-    });
-
-    const systemPrompt =
-      language === "es"
-        ? `Eres un asistente de voz humano para un restaurante italiano.
-        Fecha y hora actual: ${dateTime}.
-        Tareas: reservas, modificar/cancelar reservas, responder sobre el menú y alergias, pedidos para llevar, eventos, horarios del negocio y especiales.
-        Sé profesional, cálido y conciso. Responde en español.`
-        : `You are a human-like restaurant voice assistant.
-        Current date/time: ${dateTime}.
-        Tasks: handle reservations, modify/cancel reservations, answer menu & allergy questions, takeout orders, events, specials, and business hours.
-        Always be polite, professional, and concise.
-        If the caller prefers Spanish, say: "If you’d like to continue in Spanish, just let me know."`;
-
-    const messages = [{ role: "system", content: systemPrompt }, ...conversationHistory];
-
-    // Fast response from OpenAI
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages,
-    });
-
-    const aiResponse = completion.choices[0].message.content;
-    console.log("🤖 AI response:", aiResponse);
-
-    conversationHistory.push({ role: "assistant", content: aiResponse });
-
-    // OpenAI TTS (human-like voice)
-    const voice = language === "es" ? "alloy" : "verse"; // pick best available voices
-    const ttsResponse = await openai.audio.speech.create({
-      model: "gpt-4o-mini-tts",
-      voice,
-      input: aiResponse,
-    });
-
-    const outputFile = "/tmp/response.mp3";
-    const buffer = Buffer.from(await ttsResponse.arrayBuffer());
-    fs.writeFileSync(outputFile, buffer);
-
-    // Play TTS audio back to user
-    const gather = twiml.gather({
-      input: "speech",
-      action: "/voice",
-      method: "POST",
-    });
-    gather.play(`https://ai-assistant-491f.onrender.com/response.mp3`);
-
-    res.type("text/xml");
-    res.send(twiml.toString());
-  } catch (error) {
-    console.error("❌ Error in /voice:", error);
-    twiml.say("Sorry, something went wrong. Please try again.");
-    res.type("text/xml");
-    res.send(twiml.toString());
-  }
+  ws.on("close", () => {
+    console.log("❌ Caller disconnected");
+    session.close();
+  });
 });
 
-// Serve audio files
-app.get("/response.mp3", (req, res) => {
-  res.set("Content-Type", "audio/mpeg");
-  fs.createReadStream("/tmp/response.mp3").pipe(res);
-});
-
-// Health check
-app.get("/", (req, res) => {
-  res.send("🍝 Restaurant AI Voice Assistant is running.");
-});
-
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
+// ===== Start Server =====
+app.listen(port, () => {
+  console.log(`🚀 Server running on http://localhost:${port}`);
 });
