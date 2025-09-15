@@ -1,10 +1,12 @@
 import express from "express";
 import bodyParser from "body-parser";
 import twilio from "twilio";
+import expressWs from "express-ws";
 import WebSocket from "ws";
 import OpenAI from "openai";
 
 const app = express();
+expressWs(app); // enable ws routes
 const port = process.env.PORT || 10000;
 
 const openai = new OpenAI({
@@ -29,10 +31,10 @@ const restaurantInfo = {
 app.post("/voice", (req, res) => {
   const twiml = new VoiceResponse();
 
-  // Connect caller to our WebSocket that talks to OpenAI Realtime API
+  // Connect caller to our WebSocket endpoint
   const connect = twiml.connect();
   connect.stream({
-    url: `wss://${req.headers.host}/media`, // WebSocket endpoint
+    url: `wss://${req.headers.host}/media`,
   });
 
   res.type("text/xml");
@@ -43,7 +45,7 @@ app.post("/voice", (req, res) => {
 app.ws("/media", (ws, req) => {
   console.log("🔗 Caller connected to media stream");
 
-  // Create a Realtime session with OpenAI
+  // Connect to OpenAI Realtime API
   const session = new WebSocket("wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview", {
     headers: {
       Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
@@ -53,46 +55,44 @@ app.ws("/media", (ws, req) => {
 
   session.on("open", () => {
     console.log("✅ Connected to OpenAI Realtime API");
+
+    // Inject system instructions (restaurant context)
+    session.send(
+      JSON.stringify({
+        type: "session.update",
+        session: {
+          instructions: `
+            You are a helpful restaurant voice assistant for an Italian restaurant.
+            Tasks:
+            - Answer questions about hours: ${restaurantInfo.hours}
+            - Handle reservations and cancellations.
+            - Provide menu info: ${restaurantInfo.menu}
+            - Handle allergy questions: ${restaurantInfo.allergy}
+            - Share specials: ${restaurantInfo.specials}
+            - Mention upcoming events: ${restaurantInfo.events}
+            - Handle takeout orders.
+            If caller speaks Spanish, switch to Spanish and respond fluently.
+          `,
+          voice: "alloy",
+          modalities: ["text", "audio"],
+          input_audio_format: { type: "twilio" },
+          output_audio_format: { type: "twilio" }
+        },
+      })
+    );
   });
 
-  // Forward audio between Twilio <-> OpenAI
+  // Forward audio from Twilio → OpenAI
   ws.on("message", (msg) => {
     session.send(msg);
   });
 
-  session.on("message", async (data) => {
+  // Forward audio back OpenAI → Twilio
+  session.on("message", (data) => {
     try {
-      const event = JSON.parse(data.toString());
-
-      // Stream audio responses back to Twilio
-      if (event.type === "response.output_audio.delta") {
-        ws.send(
-          JSON.stringify({
-            event: "media",
-            media: { payload: event.delta }, // base64-encoded audio chunks
-          })
-        );
-      }
-
-      // Handle text analysis (detect Spanish)
-      if (event.type === "response.text.delta") {
-        const text = event.delta.toLowerCase();
-        if (text.includes("español") || text.match(/[ñáéíóú]/)) {
-          session.send(
-            JSON.stringify({
-              type: "response.create",
-              response: {
-                instructions:
-                  "Por supuesto, puedo hablar en español. ¿Cómo puedo ayudarte hoy?",
-                modalities: ["text", "audio"],
-                voice: "alloy",
-              },
-            })
-          );
-        }
-      }
+      ws.send(data.toString());
     } catch (err) {
-      console.error("⚠️ Error handling session event:", err);
+      console.error("⚠️ Error forwarding message:", err);
     }
   });
 
