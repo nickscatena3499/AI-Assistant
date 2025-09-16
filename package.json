@@ -1,6 +1,6 @@
 {
   "name": "ai-voice-assistant",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "AI Restaurant Voice Assistant with Twilio + OpenAI TTS + Spanish fallback",
   "main": "server.js",
   "type": "module",
