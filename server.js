@@ -83,7 +83,7 @@ app.ws("/media", (ws, req) => {
         },
         body: JSON.stringify({
           model: "gpt-4o-mini-tts",
-          voice: isSpanish ? "aria" : "verse", // pick different voices for fun
+          voice: isSpanish ? "nova" : "verse", // pick different voices for fun
           input: replyText,
         }),
       });
