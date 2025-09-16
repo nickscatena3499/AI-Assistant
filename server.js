@@ -3,89 +3,129 @@ import express from "express";
 import expressWs from "express-ws";
 import bodyParser from "body-parser";
 import cors from "cors";
+import fetch from "node-fetch";
 
+// Create express app with WebSocket support
 const app = express();
 expressWs(app);
 
-app.use(cors());
+app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
+app.use(cors());
 
-const PORT = process.env.PORT || 10000;
-
-// 🟢 Root
-app.get("/", (req, res) => {
-  res.send("🚀 AI Voice Assistant is live!");
+// ✅ Catch errors so they show in Render logs
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception:", err);
+});
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Unhandled Rejection:", reason);
 });
 
-// 🟢 Media WebSocket
+// 🔑 Load environment variables
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+// ---
+// 1. Handle incoming Twilio call
+// ---
+app.post("/voice", (req, res) => {
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Start>
+    <Stream url="wss://${req.headers.host}/media"/>
+  </Start>
+  <Say voice="Polly.Joanna">Hello, welcome to our restaurant assistant. How may I help you today?</Say>
+</Response>`;
+
+  res.type("text/xml");
+  res.send(twiml);
+});
+
+// ---
+// 2. WebSocket: Handle audio/media from Twilio
+// ---
 app.ws("/media", (ws, req) => {
   console.log("🔗 Caller connected to media stream");
 
-  ws.on("open", () => {
-    console.log("✅ WebSocket open and ready");
-  });
-
-  ws.on("message", (msg) => {
+  ws.on("message", async (msg) => {
+    let data;
     try {
-      const data = JSON.parse(msg);
+      data = JSON.parse(msg);
+    } catch (err) {
+      console.error("Invalid JSON:", msg);
+      return;
+    }
 
-      // Handle Twilio start event
-      if (data.event === "start") {
-        console.log(`📞 Call started. Stream SID: ${data.start.streamSid}`);
+    if (data.event === "start") {
+      console.log("Call started");
+    }
+
+    if (data.event === "media") {
+      // Pretend we transcribed caller speech:
+      // TODO: Replace this with OpenAI Realtime STT
+      const fakeTranscript = "hola, quiero reservar una mesa"; // demo line
+
+      // Detect Spanish fallback
+      const isSpanish = /\b(hola|gracias|quiero|mesa|cena|comida)\b/i.test(fakeTranscript);
+
+      let replyText;
+      if (isSpanish) {
+        replyText = "Claro, hoy tenemos como especial lasaña casera fresca. ¿Quiere reservar una mesa?";
+      } else {
+        replyText = "Our special today is fresh homemade lasagna. Would you like to book a table?";
+      }
+
+      // Convert text → speech using OpenAI TTS
+      const ttsResponse = await fetch("https://api.openai.com/v1/audio/speech", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini-tts",
+          voice: isSpanish ? "aria" : "verse", // pick different voices for fun
+          input: replyText,
+        }),
+      });
+
+      if (!ttsResponse.ok) {
+        console.error("TTS error:", await ttsResponse.text());
         return;
       }
 
-      // Handle Twilio media packets
-      if (data.event === "media") {
-        console.log("🎤 Received media packet");
+      const buffer = Buffer.from(await ttsResponse.arrayBuffer());
 
-        if (ws.readyState === ws.OPEN) {
-          // Echo back for now (replace with AI / TTS later)
-          ws.send(JSON.stringify({
-            event: "media",
-            streamSid: data.streamSid,
-            media: {
-              payload: data.media.payload,
-            },
-          }));
-        }
-      }
+      ws.send(
+        JSON.stringify({
+          event: "media",
+          media: {
+            payload: buffer.toString("base64"),
+          },
+        })
+      );
+    }
 
-      // Handle mark events
-      if (data.event === "mark") {
-        console.log("✅ Mark event received:", data.mark.name);
-      }
-    } catch (err) {
-      console.error("❌ Error parsing message:", err);
+    if (data.event === "stop") {
+      console.log("Call ended");
     }
   });
 
   ws.on("close", () => {
-    console.log("❌ Caller disconnected from media stream");
-  });
-
-  ws.on("error", (err) => {
-    console.error("⚠️ WebSocket error:", err);
+    console.log("❌ Caller disconnected");
   });
 });
 
-// 🟢 Fallback TTS endpoint (English + Spanish)
-app.post("/fallback-tts", (req, res) => {
-  const { text, lang } = req.body;
-
-  let responseText;
-  if (lang === "es") {
-    responseText = text || "Lo siento, no entendí eso. ¿Puede repetirlo?";
-  } else {
-    responseText = text || "Sorry, I didn’t catch that. Could you repeat?";
-  }
-
-  res.json({
-    voice: lang === "es" ? "es-ES-AlvaroNeural" : "en-US-JennyNeural",
-    text: responseText,
-  });
+// ---
+// 3. Healthcheck route
+// ---
+app.get("/", (req, res) => {
+  res.send("✅ Restaurant Voice Assistant is running with Spanish fallback!");
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
+// ---
+// 4. Start server
+// ---
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 Server running on http://0.0.0.0:${PORT}`);
 });
