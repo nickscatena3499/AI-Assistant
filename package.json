@@ -1,20 +1,30 @@
 {
   "name": "ai-voice-assistant",
   "version": "1.0.0",
-  "lockfileVersion": 3,
-  "requires": true,
-  "packages": {
-    "": {
-      "name": "ai-voice-assistant",
-      "version": "1.0.0",
-      "dependencies": {
-        "express": "^4.18.2",
-        "express-ws": "^5.0.2",
-        "cors": "^2.8.5",
-        "openai": "^4.0.0",
-        "ws": "^8.13.0",
-        "dotenv": "^16.0.3"
-      }
-    }
-  }
+  "description": "AI-powered restaurant voice assistant using Twilio Media Streams and OpenAI TTS",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.3",
+    "express": "^4.18.2",
+    "express-ws": "^5.0.2",
+    "openai": "^4.0.0",
+    "ws": "^8.13.0"
+  },
+  "engines": {
+    "node": ">=18.x"
+  },
+  "keywords": [
+    "twilio",
+    "openai",
+    "voice-assistant",
+    "restaurant",
+    "ai"
+  ],
+  "author": "Nick",
+  "license": "MIT"
 }
