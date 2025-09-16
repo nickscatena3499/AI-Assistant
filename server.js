@@ -46,6 +46,8 @@ app.post("/voice", (req, res) => {
 app.ws("/media", (ws, req) => {
   console.log("🔗 Caller connected to media stream");
 
+  let streamSid = null;
+
   ws.on("message", async (msg) => {
     let data;
     try {
@@ -57,52 +59,60 @@ app.ws("/media", (ws, req) => {
 
     if (data.event === "start") {
       console.log("Call started");
+      streamSid = data.start.streamSid;
     }
 
     if (data.event === "media") {
-      // Pretend we transcribed caller speech:
-      // TODO: Replace this with OpenAI Realtime STT
-      const fakeTranscript = "hola, quiero reservar una mesa"; // demo line
+      // ⚠️ Replace with real transcription later (OpenAI STT)
+      const fakeTranscript = "hola, quiero reservar una mesa"; // demo
 
       // Detect Spanish fallback
-      const isSpanish = /\b(hola|gracias|quiero|mesa|cena|comida)\b/i.test(fakeTranscript);
-
-      let replyText;
-      if (isSpanish) {
-        replyText = "Claro, hoy tenemos como especial lasaña casera fresca. ¿Quiere reservar una mesa?";
-      } else {
-        replyText = "Our special today is fresh homemade lasagna. Would you like to book a table?";
-      }
-
-      // Convert text → speech using OpenAI TTS
-      const ttsResponse = await fetch("https://api.openai.com/v1/audio/speech", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: "gpt-4o-mini-tts",
-          voice: isSpanish ? "nova" : "verse", // pick different voices for fun
-          input: replyText,
-        }),
-      });
-
-      if (!ttsResponse.ok) {
-        console.error("TTS error:", await ttsResponse.text());
-        return;
-      }
-
-      const buffer = Buffer.from(await ttsResponse.arrayBuffer());
-
-      ws.send(
-        JSON.stringify({
-          event: "media",
-          media: {
-            payload: buffer.toString("base64"),
-          },
-        })
+      const isSpanish = /\b(hola|gracias|quiero|mesa|cena|comida)\b/i.test(
+        fakeTranscript
       );
+
+      const replyText = isSpanish
+        ? "Claro, hoy tenemos como especial lasaña casera fresca. ¿Quiere reservar una mesa?"
+        : "Our special today is fresh homemade lasagna. Would you like to book a table?";
+
+      try {
+        // 🔊 Text → Speech using OpenAI
+        const ttsResponse = await fetch(
+          "https://api.openai.com/v1/audio/speech",
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${OPENAI_API_KEY}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              model: "gpt-4o-mini-tts",
+              voice: isSpanish ? "nova" : "verse", // ✅ valid voices
+              input: replyText,
+            }),
+          }
+        );
+
+        if (!ttsResponse.ok) {
+          console.error("TTS error:", await ttsResponse.text());
+          return;
+        }
+
+        const buffer = Buffer.from(await ttsResponse.arrayBuffer());
+
+        // ✅ Correct Twilio Media Stream format
+        ws.send(
+          JSON.stringify({
+            event: "media",
+            streamSid: streamSid,
+            media: {
+              payload: buffer.toString("base64"),
+            },
+          })
+        );
+      } catch (err) {
+        console.error("TTS processing error:", err);
+      }
     }
 
     if (data.event === "stop") {
