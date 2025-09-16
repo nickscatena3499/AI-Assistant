@@ -17,14 +17,5 @@
   },
   "engines": {
     "node": ">=18.x"
-  },
-  "keywords": [
-    "twilio",
-    "openai",
-    "voice-assistant",
-    "restaurant",
-    "ai"
-  ],
-  "author": "Nick",
-  "license": "MIT"
+  }
 }
